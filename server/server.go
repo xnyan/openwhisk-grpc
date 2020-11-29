@@ -61,7 +61,7 @@ func (self *Server) RemoveChildren(ctx context.Context, in *db.RemoveChildrenReq
 
 	if address == self.Self {
 		node := store.GetNode(in.Location)
-		for _, child := range node.Children {
+		for child, _ := range node.Children {
 			store.RemoveNode(child)
 		}
 		node.Children = nil
@@ -84,12 +84,16 @@ func (self *Server) AddChild(ctx context.Context, in *db.AddChildRequest) (*db.N
 
 	if address == self.Self {
 		node := store.AddChild(in.Location, in.Child)
+		var children []uint64
+		for child, _ := range node.Children {
+			children = append(children, child)
+		}
 		return &db.Node{
 			Location: node.Location,
 			Dep:      node.Dep,
 			Key:      node.Key,
 			Value:    node.Value,
-			Children: node.Children,
+			Children: children,
 		}, nil
 	} else {
 		// Forward request to the correct server
@@ -108,7 +112,7 @@ func (s *Server) Get(ctx context.Context, in *db.GetRequest) (*db.GetResponse, e
 	address := indexingService.LocateKey(in.Key)
 
 	if address == s.Self {
-		value, err := store.Get(in.Key, in.Location)
+		value, err := store.GetFromBranch(in.Key, in.Location)
 		return &db.GetResponse{Value: value}, err
 	} else {
 		// Forward request to the correct server
@@ -155,7 +159,7 @@ func (s *Server) Set(ctx context.Context, in *db.SetRequest) (result *db.SetResp
 	address := indexingService.LocateKey(in.Key)
 
 	if address == s.Self {
-		loc := store.Set(in.Key, in.Value, in.Dep)
+		loc := store.Set(in.Key, in.Value, in.Dep, "longest-branch")
 		// Add child
 		if in.Dep != 0 {
 			parent, _ := s.AddChild(ctx, &db.AddChildRequest{
@@ -294,20 +298,23 @@ func (s *Server) splitRange() {
 	mid := uint32((uint64(left) + uint64(right)) / 2)
 
 	var keys []uint32
-	for i, node := range store.Nodes {
-		if i == 0 || node.Key == "" {
+	for key := range store.Nodes {
+		if key == "" {
 			continue
 		}
-		keys = append(keys, utils.KeyHash(node.Location))
+		for _, node := range store.Nodes[key] {
+			keys = append(keys, utils.KeyHash(node.Location))
+		}
+
 	}
 
 	le := 0
 	greater := 0
 	for _, key := range keys {
 		if key > mid {
-			greater += 1
+			greater++
 		} else if key <= mid {
-			le += 1
+			le++
 		}
 	}
 
@@ -320,39 +327,59 @@ func (s *Server) splitRange() {
 	var results []*db.Node
 	if greater >= le {
 		i := 0
-		for _, node := range store.Nodes {
-			if node.Key == "" {
+		for key := range store.Nodes {
+			if key == "" {
 				continue
 			}
-			if keys[i] <= mid {
-				results = append(results, &db.Node{
-					Location: node.Location,
-					Dep:      node.Dep,
-					Key:      node.Key,
-					Value:    node.Value,
-					Children: node.Children,
-				})
+			for _, node := range store.Nodes[key] {
+				if node.Key == "" {
+					continue
+				}
+				if keys[i] <= mid {
+					var children []uint64
+					for child, _ := range node.Children {
+						children = append(children, child)
+					}
+					results = append(results, &db.Node{
+						Location: node.Location,
+						Dep:      node.Dep,
+						Key:      node.Key,
+						Value:    node.Value,
+						Children: children,
+					})
+				}
+				i++
 			}
-			i += 1
+
 		}
 		rightServer = s.Self
 		leftServer = server
 	} else {
 		i := 0
-		for _, node := range store.Nodes {
-			if node.Key == "" {
+		for key := range store.Nodes {
+			if key == "" {
 				continue
 			}
-			if keys[i] > mid {
-				results = append(results, &db.Node{
-					Location: node.Location,
-					Dep:      node.Dep,
-					Key:      node.Key,
-					Value:    node.Value,
-					Children: node.Children,
-				})
+			for _, node := range store.Nodes[key] {
+				if node.Key == "" {
+					continue
+				}
+				if keys[i] > mid {
+					var children []uint64
+					for child := range node.Children {
+						children = append(children, child)
+					}
+					results = append(results, &db.Node{
+						Location: node.Location,
+						Dep:      node.Dep,
+						Key:      node.Key,
+						Value:    node.Value,
+						Children: children,
+					})
+				}
+				i++
 			}
-			i += 1
+
 		}
 		rightServer = server
 		leftServer = s.Self
@@ -484,12 +511,17 @@ func (self *Server) GetNode(ctx context.Context, in *db.GetNodeRequest) (*db.Nod
 			return &db.Node{}, fmt.Errorf("Location %x not found", in.Location)
 		}
 
+		var children []uint64
+		for child := range node.Children {
+			children = append(children, child)
+		}
+
 		return &db.Node{
 			Location: node.Location,
 			Dep:      node.Dep,
 			Key:      node.Key,
 			Value:    node.Value,
-			Children: node.Children,
+			Children: children,
 		}, nil
 	} else {
 		// Forward request to the correct server
